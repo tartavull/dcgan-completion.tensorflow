@@ -8,8 +8,6 @@ import tensorflow as tf
 
 from tensorflow.python.framework import ops
 
-from utils import *
-
 class batch_norm(object):
     """Code modification of http://stackoverflow.com/a/33950177
        batch normalization : deals with poor initialization helps gradient flow
@@ -127,3 +125,22 @@ def linear(input_, output_size, name=None, stddev=0.02, bias_start=0.0, with_w=F
             return tf.matmul(input_, matrix) + bias, matrix, bias
         else:
             return tf.matmul(input_, matrix) + bias
+
+
+def pyramid(tensor, stop_shape, name="pyramid"):
+  with tf.variable_scope('pyramid'):
+    _pyramid = [tensor]
+    while _pyramid[-1]._shape[1] > stop_shape:
+      new_tensor = tf.nn.avg_pool(_pyramid[-1], [1,2,2,1],[1,2,2,1], 'VALID', name='pyramid_{}'.format(new_tensor._shape[1]))
+      _pyramid.append(new_tensor)
+    return _pyramid
+
+def pyramid_random_crop(tensor, stop_shape):
+  with tf.variable_scope('pyramid_random_crop'):
+    crop_shape = map(int, tensor._shape)
+    crop_shape[1:3] = [stop_shape,stop_shape]
+    crops = [] 
+    while tensor._shape[1] >= stop_shape:
+      crops.append(tf.random_crop(tensor, crop_shape, seed=None, name="crop_"+str(tensor._shape[1])))
+      tensor = tf.nn.avg_pool(tensor, [1,2,2,1],[1,2,2,1], 'VALID', name='avg_pool_from_{}_to_{}'.format(tensor._shape[1],tensor._shape[1]/2))
+    return crops
