@@ -15,10 +15,10 @@ from ops import *
 from utils import *
 
 class DCGAN(object):
-    def __init__(self, sess, image_size=64, is_crop=False,
+    def __init__(self, sess, image_size=32, is_crop=False,
                  batch_size=64, sample_size=64,
                  z_dim=100, gf_dim=64, df_dim=64,
-                 gfc_dim=1024, dfc_dim=1024, c_dim=3,
+                 gfc_dim=1024, dfc_dim=1024, c_dim=1,
                  checkpoint_dir=None, lam=0.1):
         """
 
@@ -37,7 +37,8 @@ class DCGAN(object):
         self.batch_size = batch_size
         self.image_size = image_size
         self.sample_size = sample_size
-        self.image_shape = [image_size, image_size, 3]
+        self.c_dim = c_dim
+        self.image_shape = [image_size, image_size, c_dim]
 
         self.z_dim = z_dim
 
@@ -49,12 +50,10 @@ class DCGAN(object):
 
         self.lam = lam
 
-        self.c_dim = 3
 
         # batch normalization : deals with poor initialization helps gradient flow
         self.d_bn1 = batch_norm(name='d_bn1')
         self.d_bn2 = batch_norm(name='d_bn2')
-        self.d_bn3 = batch_norm(name='d_bn3')
 
         self.g_bn0 = batch_norm(name='g_bn0')
         self.g_bn1 = batch_norm(name='g_bn1')
@@ -289,53 +288,44 @@ class DCGAN(object):
         h0 = lrelu(conv2d(image, self.df_dim, name='d_h0_conv'))
         h1 = lrelu(self.d_bn1(conv2d(h0, self.df_dim*2, name='d_h1_conv')))
         h2 = lrelu(self.d_bn2(conv2d(h1, self.df_dim*4, name='d_h2_conv')))
-        h3 = lrelu(self.d_bn3(conv2d(h2, self.df_dim*8, name='d_h3_conv')))
-        h4 = linear(tf.reshape(h3, [-1, 8192]), 1, 'd_h3_lin')
+        h3 = linear(tf.reshape(h2, [-1, 4096]), 1, 'd_h3_lin')
 
-        return tf.nn.sigmoid(h4), h4
+        return tf.nn.sigmoid(h3), h3
 
     def generator(self, z):
-        self.z_, self.h0_w, self.h0_b = linear(z, self.gf_dim*8*4*4, 'g_h0_lin', with_w=True)
+        self.z_, self.h0_w, self.h0_b = linear(z, self.gf_dim*4*4*4, 'g_h0_lin', with_w=True)
 
-        self.h0 = tf.reshape(self.z_, [-1, 4, 4, self.gf_dim * 8])
+        self.h0 = tf.reshape(self.z_, [-1, 4, 4, self.gf_dim * 4])
         h0 = tf.nn.relu(self.g_bn0(self.h0))
 
         self.h1, self.h1_w, self.h1_b = conv2d_transpose(h0,
-            [self.batch_size, 8, 8, self.gf_dim*4], name='g_h1', with_w=True)
+            [self.batch_size, 8, 8, self.gf_dim*2], name='g_h1', with_w=True)
         h1 = tf.nn.relu(self.g_bn1(self.h1))
 
         h2, self.h2_w, self.h2_b = conv2d_transpose(h1,
-            [self.batch_size, 16, 16, self.gf_dim*2], name='g_h2', with_w=True)
+            [self.batch_size, 16, 16, self.gf_dim*1], name='g_h2', with_w=True)
         h2 = tf.nn.relu(self.g_bn2(h2))
 
         h3, self.h3_w, self.h3_b = conv2d_transpose(h2,
-            [self.batch_size, 32, 32, self.gf_dim*1], name='g_h3', with_w=True)
-        h3 = tf.nn.relu(self.g_bn3(h3))
-
-        h4, self.h4_w, self.h4_b = conv2d_transpose(h3,
-            [self.batch_size, 64, 64, 3], name='g_h4', with_w=True)
-
-        return tf.nn.tanh(h4)
+            [self.batch_size, 32, 32, self.c_dim], name='g_h3', with_w=True)
+    
+        return tf.nn.tanh(h3)
 
     def sampler(self, z, y=None):
         tf.get_variable_scope().reuse_variables()
 
-        h0 = tf.reshape(linear(z, self.gf_dim*8*4*4, 'g_h0_lin'),
-                        [-1, 4, 4, self.gf_dim * 8])
+        h0 = tf.reshape(linear(z, self.gf_dim*4*4*4, 'g_h0_lin'),[-1, 4, 4, self.gf_dim * 4])
         h0 = tf.nn.relu(self.g_bn0(h0, train=False))
 
-        h1 = conv2d_transpose(h0, [self.batch_size, 8, 8, self.gf_dim*4], name='g_h1')
+        h1 = conv2d_transpose(h0, [self.batch_size, 8, 8, self.gf_dim*2], name='g_h1')
         h1 = tf.nn.relu(self.g_bn1(h1, train=False))
 
-        h2 = conv2d_transpose(h1, [self.batch_size, 16, 16, self.gf_dim*2], name='g_h2')
+        h2 = conv2d_transpose(h1, [self.batch_size, 16, 16, self.gf_dim*1], name='g_h2')
         h2 = tf.nn.relu(self.g_bn2(h2, train=False))
 
-        h3 = conv2d_transpose(h2, [self.batch_size, 32, 32, self.gf_dim*1], name='g_h3')
-        h3 = tf.nn.relu(self.g_bn3(h3, train=False))
+        h3 = conv2d_transpose(h2, [self.batch_size, 32, 32, self.c_dim], name='g_h3')
 
-        h4 = conv2d_transpose(h3, [self.batch_size, 64, 64, 3], name='g_h4')
-
-        return tf.nn.tanh(h4)
+        return tf.nn.tanh(h3)
 
     def save(self, checkpoint_dir, step):
         if not os.path.exists(checkpoint_dir):
