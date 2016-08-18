@@ -16,7 +16,7 @@ from utils import *
 
 class DCGAN(object):
     def __init__(self, sess, image_size=32, is_crop=False,
-                 batch_size=64, sample_size=64,
+                 batch_size=128, sample_size=128,
                  z_dim=100, gf_dim=64, df_dim=64,
                  gfc_dim=1024, dfc_dim=1024, c_dim=1,
                  checkpoint_dir=None, lam=0.1):
@@ -189,7 +189,7 @@ class DCGAN(object):
                         [self.sampler, self.d_loss, self.g_loss],
                         feed_dict={self.z: sample_z, self.images: sample_images}
                     )
-                    save_images(samples, [8, 8],
+                    save_images(samples, [8, self.sample_size/8],
                                 './samples/train_{:02d}_{:04d}.png'.format(epoch, idx))
                     print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
 
