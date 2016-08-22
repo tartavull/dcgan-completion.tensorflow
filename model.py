@@ -106,7 +106,7 @@ class DCGAN(object):
         self.d_vars = [var for var in t_vars if 'd_' in var.name]
         self.g_vars = [var for var in t_vars if 'g_' in var.name]
 
-        self.saver = tf.train.Saver(max_to_keep=1)
+        self.saver = tf.train.Saver(max_to_keep=10)
 
         # Completion.
         self.mask = tf.placeholder(tf.float32, [None] + self.image_shape, name='mask')
@@ -198,9 +198,14 @@ class DCGAN(object):
 
 
     def complete(self, config):
-        os.makedirs(os.path.join(config.outDir, 'hats_imgs'), exist_ok=True)
-        os.makedirs(os.path.join(config.outDir, 'completed'), exist_ok=True)
+        np.set_printoptions(suppress=True)
 
+        if not os.path.exists(os.path.join(config.outDir, 'hats_imgs')):
+            os.makedirs(os.path.join(config.outDir, 'hats_imgs'))
+        if not os.path.exists(os.path.join(config.outDir, 'completed')):
+            os.makedirs(os.path.join(config.outDir, 'completed'))
+        if not os.path.exists(os.path.join(config.outDir, 'gradients')):
+            os.makedirs(os.path.join(config.outDir, 'gradients'))
         tf.initialize_all_variables().run()
 
         isLoaded = self.load(self.checkpoint_dir)
@@ -213,7 +218,7 @@ class DCGAN(object):
         if config.maskType == 'random':
             assert(False)
         elif config.maskType == 'center':
-            scale = 0.25
+            scale = 0.35
             assert(scale <= 0.5)
             mask = np.ones(self.image_shape)
             sz = self.image_size
@@ -259,8 +264,9 @@ class DCGAN(object):
                     self.mask: batch_mask,
                     self.images: batch_images,
                 }
-                run = [self.complete_loss, self.grad_complete_loss, self.G]
-                loss, g, G_imgs = self.sess.run(run, feed_dict=fd)
+                run = [self.contextual_loss , self.perceptual_loss, self.complete_loss, self.grad_complete_loss, self.G]
+                contextual, perceptual, loss, g, G_imgs = self.sess.run(run, feed_dict=fd)
+                assert g[0].shape[0] == batchSz, "I would call this a bug"
 
                 v_prev = np.copy(v)
                 v = config.momentum*v - config.lr*g[0]
@@ -268,7 +274,10 @@ class DCGAN(object):
                 np.clip(zhats, -1, 1)
 
                 if i % 50 == 0:
-                    print(i, np.mean(loss[0:batchSz]))
+                    print('iteratation: {}, complete loss {}, contextual {},  perceptual {}'.format(
+                        i, np.mean(loss[0:batchSz]),
+                           np.mean(contextual[0:batchSz]),
+                           perceptual))
                     imgName = os.path.join(config.outDir,
                                            'hats_imgs/{:04d}.png'.format(i))
                     nRows = np.ceil(batchSz/8)
@@ -280,6 +289,15 @@ class DCGAN(object):
                     imgName = os.path.join(config.outDir,
                                            'completed/{:04d}.png'.format(i))
                     save_images(completeed[:batchSz,:,:,:], [nRows,nCols], imgName)
+
+                    #save gradients
+                    images = contextual - np.min(contextual)
+                    images = images / np.max(images)
+                    images = images[:,np.newaxis,np.newaxis] * np.ones(shape=(128,32,32))
+                    images = images[:,:,:,np.newaxis]
+                    imgName = os.path.join(config.outDir,
+                                           'gradients/{:04d}.png'.format(i))
+                    save_images(images[:batchSz,:,:,:], [nRows,nCols], imgName)
 
     def discriminator(self, image, reuse=False):
         if reuse:
@@ -330,7 +348,6 @@ class DCGAN(object):
     def save(self, checkpoint_dir, step):
         if not os.path.exists(checkpoint_dir):
             os.makedirs(checkpoint_dir)
-
         self.saver.save(self.sess,
                         os.path.join(checkpoint_dir, self.model_name),
                         global_step=step)
