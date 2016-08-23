@@ -38,7 +38,7 @@ class DCGAN(object):
         self.is_crop = is_crop
         self.batch_size = batch_size
         self.image_size = image_size
-        self.sample_size = sample_size
+        self.sample_size = sample_size #Shouldn't batch_size and sample_size be the same?
         self.c_dim = c_dim
         self.image_shape = [image_size, image_size, c_dim]
         self.piramid = piramid
@@ -111,10 +111,6 @@ class DCGAN(object):
         self.g_loss_sum = tf.scalar_summary("g_loss", self.g_loss)
         self.d_loss_sum = tf.scalar_summary("d_loss", self.d_loss)
 
-        t_vars = tf.trainable_variables()
-        self.d_vars = [var for var in t_vars if 'd_' in var.name]
-        self.g_vars = [var for var in t_vars if 'g_' in var.name]
-
         self.saver = tf.train.Saver(max_to_keep=10)
 
         # Completion.
@@ -126,11 +122,34 @@ class DCGAN(object):
         self.complete_loss = self.contextual_loss + self.lam*self.perceptual_loss
         self.grad_complete_loss = tf.gradients(self.complete_loss, self.z)
 
-    def train(self, config):
-        data = glob(os.path.join(config.dataset, "*.png"))
-        #np.random.shuffle(data)
-        assert(len(data) > 0)
 
+    def _build_sampling_constants(self,data):
+        """
+        When sampling, we will always use the same seeds, and the same sample files to compute the loss
+        """
+        sample_z = np.random.uniform(-1, 1, size=(self.sample_size , self.z_dim))
+        sample_files = data[0:self.sample_size]
+        sample = [get_image(sample_file, self.image_size, is_crop=self.is_crop) for sample_file in sample_files]
+        sample_images = np.array(sample).astype(np.float32)
+        return sample_z, sample_images
+
+    def _build_batch(self, data, idx):
+        """
+        Pretty much the same as _build_sampling_constants
+        """
+        batch_files = data[idx*self.batch_size:(idx+1)*self.batch_size]
+        batch = [get_image(batch_file, self.image_size, is_crop=self.is_crop)
+                 for batch_file in batch_files]
+        batch_images = np.array(batch).astype(np.float32)
+
+        batch_z = np.random.uniform(-1, 1, [self.batch_size, self.z_dim]) \
+                    .astype(np.float32)
+        return batch_z, batch_images           
+
+    def train(self, config):
+        t_vars = tf.trainable_variables()
+        self.d_vars = [var for var in t_vars if 'd_' in var.name]
+        self.g_vars = [var for var in t_vars if 'g_' in var.name]
         d_optim = tf.train.AdamOptimizer(config.learning_rate, beta1=config.beta1) \
                           .minimize(self.d_loss, var_list=self.d_vars)
         g_optim = tf.train.AdamOptimizer(config.learning_rate, beta1=config.beta1) \
@@ -143,10 +162,11 @@ class DCGAN(object):
             [self.z_sum, self.d_sum, self.d_loss_real_sum, self.d_loss_sum])
         self.writer = tf.train.SummaryWriter("./logs", self.sess.graph)
 
-        sample_z = np.random.uniform(-1, 1, size=(self.sample_size , self.z_dim))
-        sample_files = data[0:self.sample_size]
-        sample = [get_image(sample_file, self.image_size, is_crop=self.is_crop) for sample_file in sample_files]
-        sample_images = np.array(sample).astype(np.float32)
+        data = glob(os.path.join(config.dataset, "*.png"))
+        #np.random.shuffle(data)
+        assert(len(data) > 0)
+        batch_idxs = min(len(data), config.train_size) // self.batch_size
+        sample_z, sample_images = self._build_sampling_constants(data)
 
         counter = 1
         start_time = time.time()
@@ -157,42 +177,28 @@ class DCGAN(object):
             print(" [!] Load failed...")
 
         for epoch in xrange(config.epoch):
-            data = glob(os.path.join(config.dataset, "*.png"))
-            batch_idxs = min(len(data), config.train_size) // self.batch_size
+            for idx in xrange(batch_idxs):
+          
 
-            for idx in xrange(0, batch_idxs):
-                batch_files = data[idx*config.batch_size:(idx+1)*config.batch_size]
-                batch = [get_image(batch_file, self.image_size, is_crop=self.is_crop)
-                         for batch_file in batch_files]
-                batch_images = np.array(batch).astype(np.float32)
-
-                batch_z = np.random.uniform(-1, 1, [config.batch_size, self.z_dim]) \
-                            .astype(np.float32)
+                batch_z, batch_images = self._build_batch(data, idx)
 
                 # Update D network
-                _, summary_str = self.sess.run([d_optim, self.d_sum],
+                _, summary_str_d, _ , summary_str_g = self.sess.run([d_optim, self.d_sum, g_optim, self.g_sum],
                     feed_dict={ self.images: batch_images, self.z: batch_z })
-                self.writer.add_summary(summary_str, counter)
+                self.writer.add_summary(summary_str_d, counter)
+                self.writer.add_summary(summary_str_g, counter)
 
-                # Update G network
-                _, summary_str = self.sess.run([g_optim, self.g_sum],
-                    feed_dict={ self.z: batch_z })
+                        # Run g_optim twice to make sure that d_loss does not go to zero (different from paper)
+                _, summary_str, errD_fake, errD_real, errG = self.sess.run(
+                    [g_optim, self.g_sum, self.d_loss_fake, self.d_loss_real, self.g_loss],
+                    feed_dict={ self.z: batch_z, self.images: batch_images })
                 self.writer.add_summary(summary_str, counter)
-
-                # Run g_optim twice to make sure that d_loss does not go to zero (different from paper)
-                _, summary_str = self.sess.run([g_optim, self.g_sum],
-                    feed_dict={ self.z: batch_z })
-                self.writer.add_summary(summary_str, counter)
-
-                errD_fake = self.d_loss_fake.eval({self.z: batch_z})
-                errD_real = self.d_loss_real.eval({self.images: batch_images})
-                errG = self.g_loss.eval({self.z: batch_z})
 
                 counter += 1
                 print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
                     % (epoch, idx, batch_idxs,
                         time.time() - start_time, errD_fake+errD_real, errG))
-
+summary_str_g
                 if np.mod(counter, 100) == 1:
                     samples, d_loss, g_loss = self.sess.run(
                         [self.sampler_32, self.d_loss, self.g_loss],
