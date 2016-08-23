@@ -13,6 +13,7 @@ from six.moves import xrange
 
 from ops import *
 from utils import *
+import cPickle as pickle
 
 class DCGAN(object):
     def __init__(self, sess, image_size=32, is_crop=False,
@@ -197,6 +198,73 @@ class DCGAN(object):
                     self.save(config.checkpoint_dir, counter)
 
 
+    def find_best_z(self, config,  zhats, batch_mask, batch_images, batchSz, v, masked_images, nIter=100):
+
+        for i in xrange(nIter):
+            fd = {
+                self.z: zhats,
+                self.mask: batch_mask,
+                self.images: batch_images,
+            }
+            run = [self.contextual_loss , self.perceptual_loss, self.complete_loss, self.grad_complete_loss, self.G]
+            contextual, perceptual, loss, g, G_imgs = self.sess.run(run, feed_dict=fd)
+            assert g[0].shape[0] == batchSz, "I would call this a bug"
+
+            v_prev = np.copy(v)
+            v = config.momentum*v - config.lr*g[0]
+            zhats += -config.momentum * v_prev + (1+config.momentum)*v
+            np.clip(zhats, -1, 1)
+
+            if i % 50 == 0:
+                print('iteratation: {}, complete loss {}, contextual {},  perceptual {}'.format(
+                    i, np.mean(loss[0:batchSz]),
+                       np.mean(contextual[0:batchSz]),
+                       perceptual))
+                # imgName = os.path.join(config.outDir,
+                #                        'hats_imgs/{:04d}.png'.format(i))
+                # nRows = np.ceil(batchSz/8)
+                # nCols = 8
+                # save_images(G_imgs[:batchSz,:,:,:], [nRows,nCols], imgName)
+
+                # inv_masked_hat_images = np.multiply(G_imgs, 1.0-batch_mask)
+                # completeed = masked_images + inv_masked_hat_images
+                # imgName = os.path.join(config.outDir,
+                #                        'completed/{:04d}.png'.format(i))
+                # save_images(completeed[:batchSz,:,:,:], [nRows,nCols], imgName)
+
+                # #save gradients
+                # images = contextual - np.min(contextual)
+                # images = images / np.max(images)
+                # images = images[:,np.newaxis,np.newaxis] * np.ones(shape=(128,32,32))
+                # images = images[:,:,:,np.newaxis]
+                # imgName = os.path.join(config.outDir,
+                #                        'gradients/{:04d}.png'.format(i))
+                # save_images(images[:batchSz,:,:,:], [nRows,nCols], imgName)
+
+        return zhats, loss
+
+
+    def _create_mask(self, config):
+
+        if config.maskType == 'random':
+            assert(False)
+        elif config.maskType == 'center':
+            scale = 0.35
+            assert(scale <= 0.5)
+            mask = np.ones(self.image_shape)
+            sz = self.image_size
+            l = int(self.image_size*scale)
+            u = int(self.image_size*(1.0-scale))
+            mask[l:u, l:u, :] = 0.0
+        elif config.maskType == 'left':
+            assert(False)
+        elif config.maskType == 'full':
+            mask = np.ones(self.image_shape)
+        else:
+            assert(False)
+
+        return mask
+
     def complete(self, config):
         np.set_printoptions(suppress=True)
 
@@ -215,22 +283,9 @@ class DCGAN(object):
         nImgs = len(config.imgs)
 
         batch_idxs = int(np.ceil(nImgs/self.batch_size))
-        if config.maskType == 'random':
-            assert(False)
-        elif config.maskType == 'center':
-            scale = 0.35
-            assert(scale <= 0.5)
-            mask = np.ones(self.image_shape)
-            sz = self.image_size
-            l = int(self.image_size*scale)
-            u = int(self.image_size*(1.0-scale))
-            mask[l:u, l:u, :] = 0.0
-        elif config.maskType == 'left':
-            assert(False)
-        elif config.maskType == 'full':
-            mask = np.ones(self.image_shape)
-        else:
-            assert(False)
+   
+        mask = self._create_mask(config)
+
 
         for idx in xrange(0, batch_idxs):
             l = idx*self.batch_size
@@ -247,57 +302,35 @@ class DCGAN(object):
                 batch_images = batch_images.astype(np.float32)
 
             batch_mask = np.resize(mask, [self.batch_size] + self.image_shape)
-            zhats = np.random.uniform(-1, 1, size=(self.batch_size, self.z_dim))
-            v = 0
 
             nRows = np.ceil(batchSz/8)
             nCols = 8
-            save_images(batch_images[:batchSz,:,:,:], [nRows,nCols],
-                        os.path.join(config.outDir, 'before.png'))
+            # save_images(batch_images[:batchSz,:,:,:], [nRows,nCols],
+            #             os.path.join(config.outDir, 'before.png'))
             masked_images = np.multiply(batch_images, batch_mask)
-            save_images(masked_images[:batchSz,:,:,:], [nRows,nCols],
-                        os.path.join(config.outDir, 'masked.png'))
+            # save_images(masked_images[:batchSz,:,:,:], [nRows,nCols],
+            #             os.path.join(config.outDir, 'masked.png'))
 
-            for i in xrange(config.nIter):
-                fd = {
-                    self.z: zhats,
-                    self.mask: batch_mask,
-                    self.images: batch_images,
-                }
-                run = [self.contextual_loss , self.perceptual_loss, self.complete_loss, self.grad_complete_loss, self.G]
-                contextual, perceptual, loss, g, G_imgs = self.sess.run(run, feed_dict=fd)
-                assert g[0].shape[0] == batchSz, "I would call this a bug"
+            n_sampling = 10
+            all_contextual = np.empty(shape=(self.batch_size, n_sampling))
+            all_z = np.empty(shape=(self.batch_size, self.z_dim, n_sampling))
+            for sample in xrange(n_sampling):
+                zhats = np.random.uniform(-1, 1, size=(self.batch_size, self.z_dim))
+                v = 0
+                all_z[:,:,sample] , all_contextual[:,sample] = self.find_best_z(config, zhats, batch_mask, batch_images, batchSz, v, masked_images)
 
-                v_prev = np.copy(v)
-                v = config.momentum*v - config.lr*g[0]
-                zhats += -config.momentum * v_prev + (1+config.momentum)*v
-                np.clip(zhats, -1, 1)
+            best_sample = np.argmin(all_contextual, axis=1)
+            best_z = np.empty(shape=(self.batch_size, self.z_dim))
+            best_loss = np.empty(shape=(self.batch_size, 1))
+            for i in range(self.batch_size):
+                best_z[i,:] = all_z[i,:,best_sample[i]]
+                best_loss =  all_contextual[i, best_sample[i]]
 
-                if i % 50 == 0:
-                    print('iteratation: {}, complete loss {}, contextual {},  perceptual {}'.format(
-                        i, np.mean(loss[0:batchSz]),
-                           np.mean(contextual[0:batchSz]),
-                           perceptual))
-                    imgName = os.path.join(config.outDir,
-                                           'hats_imgs/{:04d}.png'.format(i))
-                    nRows = np.ceil(batchSz/8)
-                    nCols = 8
-                    save_images(G_imgs[:batchSz,:,:,:], [nRows,nCols], imgName)
-
-                    inv_masked_hat_images = np.multiply(G_imgs, 1.0-batch_mask)
-                    completeed = masked_images + inv_masked_hat_images
-                    imgName = os.path.join(config.outDir,
-                                           'completed/{:04d}.png'.format(i))
-                    save_images(completeed[:batchSz,:,:,:], [nRows,nCols], imgName)
-
-                    #save gradients
-                    images = contextual - np.min(contextual)
-                    images = images / np.max(images)
-                    images = images[:,np.newaxis,np.newaxis] * np.ones(shape=(128,32,32))
-                    images = images[:,:,:,np.newaxis]
-                    imgName = os.path.join(config.outDir,
-                                           'gradients/{:04d}.png'.format(i))
-                    save_images(images[:batchSz,:,:,:], [nRows,nCols], imgName)
+            print np.mean(best_loss)
+            v = 0
+            zhats = self.find_best_z(config, best_z , batch_mask, batch_images, batchSz, v, masked_images, nIter=config.nIter)
+            with open('./completions/{}.p'.format(idx),'wb') as f:
+                pickle.dump(zhats,f)
 
     def discriminator(self, image, reuse=False):
         if reuse:

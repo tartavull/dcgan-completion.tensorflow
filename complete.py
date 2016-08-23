@@ -20,11 +20,14 @@ parser.add_argument('--checkpointDir', type=str, default='checkpoint')
 parser.add_argument('--outDir', type=str, default='completions')
 parser.add_argument('--maskType', type=str,
                     choices=['random', 'center', 'left', 'full'],
-                    default='center')
+                    default='full')
 parser.add_argument('imgs', type=str, nargs='+')
 
-args = parser.parse_args()
 
+args = parser.parse_args()
+import glob
+args.imgs=  list(glob.glob('./data/mnist_png/training/all/*.png'))
+print args
 assert(os.path.exists(args.checkpointDir))
 
 config = tf.ConfigProto()
