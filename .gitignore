@@ -4,3 +4,4 @@ checkpoint
 data
 __pycache__
 out
+*.pyc
