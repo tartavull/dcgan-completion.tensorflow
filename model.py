@@ -17,7 +17,7 @@ import cPickle as pickle
 
 class DCGAN(object):
     def __init__(self, sess, image_size=256, is_crop=False,
-                 batch_size=128, sample_size=128,
+                 batch_size=128,
                  z_dim=100, gf_dim=64, df_dim=64,
                  gfc_dim=1024, dfc_dim=1024, c_dim=3,
                  checkpoint_dir=None, lam=0.1, piramid=(32,) ):
@@ -38,7 +38,6 @@ class DCGAN(object):
         self.is_crop = is_crop
         self.batch_size = batch_size
         self.image_size = image_size
-        self.sample_size = sample_size #Shouldn't batch_size and sample_size be the same?
         self.c_dim = c_dim
         self.image_shape = [image_size, image_size, c_dim]
         self.piramid = piramid
@@ -51,57 +50,39 @@ class DCGAN(object):
         self.checkpoint_dir = checkpoint_dir
         self.lam = lam
 
-
-
-
-        # batch normalization : deals with poor initialization helps gradient flow
-        self.d_bn1 = batch_norm(name='d_bn1')
-        self.d_bn2 = batch_norm(name='d_bn2')
-
-        self.g_bn0 = batch_norm(name='g_bn0')
-        self.g_bn1 = batch_norm(name='g_bn1')
-        self.g_bn2 = batch_norm(name='g_bn2')
-        self.g_bn3 = batch_norm(name='g_bn3')
-        self.g_bn4 = batch_norm(name='g_bn4')
-        self.g_bn5 = batch_norm(name='g_bn5')
-
         self.build_model()
 
         self.model_name = "DCGAN.model"
 
     def build_model(self):
         self.images = tf.placeholder(
-            tf.float32, [None] + self.image_shape, name='real_images')
-        self.sample_images= tf.placeholder(
-            tf.float32, [None] + self.image_shape, name='sample_images')
-        self.z = tf.placeholder(tf.float32, [None, self.z_dim], name='z')
+            tf.float32, [self.batch_size] + self.image_shape, name='real_images')
+        self.z = tf.placeholder(tf.float32, [self.batch_size, self.z_dim], name='z')
         self.z_sum = tf.histogram_summary("z", self.z)
 
         self.images_32 = tf.nn.avg_pool(self.images, [1,8,8,1],[1,8,8,1], 'VALID',  name='real_images_32')
-        self.sample_images_32 = tf.nn.avg_pool(self.sample_images, [1,8,8,1],[1,8,8,1], 'VALID',  name='sample_images_32')
 
         self.G = self.generator(self.z)
         self.G_32 = tf.nn.avg_pool(self.G, [1,8,8,1],[1,8,8,1], 'VALID')
-        self.D, self.D_logits = self.discriminator(self.images_32)
+        self.D_real, self.D_logits_real = self.discriminator(self.images_32)
+        self.D_fake, self.D_logits_fake = self.discriminator(self.G_32, reuse=True)
+        
 
-        self.sampler = self.sampler(self.z)
-        self.sampler_32 = tf.nn.avg_pool(self.sampler, [1,8,8,1],[1,8,8,1], 'VALID')
-        self.D_, self.D_logits_ = self.discriminator(self.G_32, reuse=True)
 
-        self.d_sum = tf.histogram_summary("d", self.D)
-        self.d__sum = tf.histogram_summary("d_", self.D_)
+        self.d_sum = tf.histogram_summary("d", self.D_real)
+        self.d__sum = tf.histogram_summary("d_", self.D_fake)
         self.G_32_sum = tf.image_summary("G_32", self.G_32)
         self.G_sum = tf.image_summary("G", self.G)
 
         self.d_loss_real = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(self.D_logits,
-                                                    tf.ones_like(self.D)))
+            tf.nn.sigmoid_cross_entropy_with_logits(self.D_logits_real,
+                                                    tf.ones_like(self.D_real)))
         self.d_loss_fake = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(self.D_logits_,
-                                                    tf.zeros_like(self.D_)))
+            tf.nn.sigmoid_cross_entropy_with_logits(self.D_logits_fake,
+                                                    tf.zeros_like(self.D_fake)))
         self.g_loss = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(self.D_logits_,
-                                                    tf.ones_like(self.D_)))
+            tf.nn.sigmoid_cross_entropy_with_logits(self.D_logits_fake,
+                                                    tf.ones_like(self.D_fake)))
 
         self.d_loss_real_sum = tf.scalar_summary("d_loss_real", self.d_loss_real)
         self.d_loss_fake_sum = tf.scalar_summary("d_loss_fake", self.d_loss_fake)
@@ -111,7 +92,7 @@ class DCGAN(object):
         self.g_loss_sum = tf.scalar_summary("g_loss", self.g_loss)
         self.d_loss_sum = tf.scalar_summary("d_loss", self.d_loss)
 
-        self.saver = tf.train.Saver(max_to_keep=10)
+        # self.saver = tf.train.Saver(max_to_keep=10)
 
         # Completion.
         self.mask = tf.placeholder(tf.float32, [None] + [self.piramid[0],self.piramid[0], self.c_dim], name='mask')
@@ -127,8 +108,8 @@ class DCGAN(object):
         """
         When sampling, we will always use the same seeds, and the same sample files to compute the loss
         """
-        sample_z = np.random.uniform(-1, 1, size=(self.sample_size , self.z_dim))
-        sample_files = data[0:self.sample_size]
+        sample_z = np.random.uniform(-1, 1, size=(self.batch_size , self.z_dim))
+        sample_files = data[0:self.batch_size]
         sample = [get_image(sample_file, self.image_size, is_crop=self.is_crop) for sample_file in sample_files]
         sample_images = np.array(sample).astype(np.float32)
         return sample_z, sample_images
@@ -198,18 +179,18 @@ class DCGAN(object):
                 print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
                     % (epoch, idx, batch_idxs,
                         time.time() - start_time, errD_fake+errD_real, errG))
-summary_str_g
+
                 if np.mod(counter, 100) == 1:
                     samples, d_loss, g_loss = self.sess.run(
-                        [self.sampler_32, self.d_loss, self.g_loss],
+                        [self.G_32, self.d_loss, self.g_loss],
                         feed_dict={self.z: sample_z, self.images: sample_images}
                     )
-                    save_images(samples, [8, self.sample_size/8],
+                    save_images(samples, [8, self.batch_size/8],
                                 './samples/train_{:02d}_{:04d}.png'.format(epoch, idx))
                     print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
 
-                if np.mod(counter, 500) == 2:
-                    self.save(config.checkpoint_dir, counter)
+                # if np.mod(counter, 500) == 2:
+                #     self.save(config.checkpoint_dir, counter)
 
 
     def find_best_z(self, config,  zhats, batch_mask, batch_images, batchSz, v, masked_images, nIter=100):
@@ -347,78 +328,64 @@ summary_str_g
                 pickle.dump(zhats,f)
 
     def discriminator(self, image, reuse=False):
-        if reuse:
-            tf.get_variable_scope().reuse_variables()
+      
+        with tf.variable_scope("discriminator", reuse=reuse):
+            with tf.variable_scope("layer_0"):
+                h0 = lrelu(conv2d(image, self.df_dim, name='d_h0_conv'))
+                d_bn1 = batch_norm(name='d_bn1')
+                h1 = lrelu(d_bn1(conv2d(h0, self.df_dim*2, name='d_h1_conv')))
 
-        h0 = lrelu(conv2d(image, self.df_dim, name='d_h0_conv'))
-        h1 = lrelu(self.d_bn1(conv2d(h0, self.df_dim*2, name='d_h1_conv')))
-        h2 = lrelu(self.d_bn2(conv2d(h1, self.df_dim*4, name='d_h2_conv')))
-        h3 = linear(tf.reshape(h2, [-1, 4096]), 1, 'd_h3_lin')
-
-        return tf.nn.sigmoid(h3), h3
+            with tf.variable_scope("layer_1"):
+                d_bn2 = batch_norm(name='d_bn2')
+                h2 = lrelu(d_bn2(conv2d(h1, self.df_dim*4, name='d_h2_conv')))
+            
+            with tf.variable_scope("layer_2"):
+                h3 = linear(tf.reshape(h2, [-1, 4096]), 1, 'd_h3_lin')
+                return tf.nn.sigmoid(h3), h3
 
     def generator(self, z):
-        self.z_, self.h0_w, self.h0_b = linear(z, self.gf_dim*4*4*4*8, 'g_h0_lin', with_w=True)
+        with tf.variable_scope("generator"):
+            self.z_ = linear(z, self.gf_dim*4*4*4*8, 'g_h0_lin')
 
-        self.h0 = tf.reshape(self.z_, [self.batch_size, 4, 4, self.gf_dim * 32])
-        h0 = tf.nn.relu(self.g_bn0(self.h0))
-        print h0._shape
+            with tf.variable_scope("layer_0"):
+                h0 = tf.reshape(self.z_, [self.batch_size, 4, 4, self.gf_dim * 32])
+                g_bn0 = batch_norm(name='g_bn0')
+                h0 = tf.nn.relu(g_bn0(h0))
 
-        self.h1, self.h1_w, self.h1_b = conv2d_transpose(h0,
-            [self.batch_size, 8, 8, self.gf_dim*16], name='g_h1', with_w=True)
-        h1 = tf.nn.relu(self.g_bn1(self.h1))
+            with tf.variable_scope("layer_1"):
+                h1 = conv2d_transpose(h0,
+                    [self.batch_size, 8, 8, self.gf_dim*16], name='g_h1')
+                g_bn1 = batch_norm(name='g_bn1')
+                h1 = tf.nn.relu(g_bn1(h1))
 
-        h2, self.h2_w, self.h2_b = conv2d_transpose(h1,
-            [self.batch_size, 16, 16, self.gf_dim*8], name='g_h2', with_w=True)
-        h2 = tf.nn.relu(self.g_bn2(h2))
+            with tf.variable_scope("layer_2"):
+                h2 = conv2d_transpose(h1,
+                    [self.batch_size, 16, 16, self.gf_dim*8], name='g_h2')
+                g_bn2 = batch_norm(name='g_bn2')
+                h2 = tf.nn.relu(g_bn2(h2))
 
-        h3, self.h3_w, self.h3_b = conv2d_transpose(h2,
-            [self.batch_size, 32, 32, self.gf_dim*4], name='g_h3', with_w=True)
-        h3 = tf.nn.relu(self.g_bn3(h3))        
+            with tf.variable_scope("layer_3"):
+                h3 = conv2d_transpose(h2,
+                    [self.batch_size, 32, 32, self.gf_dim*4], name='g_h3')
+                g_bn3 = batch_norm(name='g_bn3')
+                h3 = tf.nn.relu(g_bn3(h3))        
+            
+            with tf.variable_scope("layer_4"):
+                h4 = conv2d_transpose(h3,
+                    [self.batch_size, 64, 64, self.gf_dim*2], name='g_h4')
+                g_bn4 = batch_norm(name='g_bn4')
+                h4 = tf.nn.relu(g_bn4(h4))
 
-        h4, self.h4_w, self.h4_b = conv2d_transpose(h3,
-            [self.batch_size, 64, 64, self.gf_dim*2], name='g_h4', with_w=True)
-        h4 = tf.nn.relu(self.g_bn4(h4))
-
-        h5, self.h5_w, self.h5_b = conv2d_transpose(h4,
-            [self.batch_size, 128, 128, self.gf_dim*1], name='g_h5', with_w=True)
-        h5 = tf.nn.relu(self.g_bn5(h5))
-
-        h6, self.h6_w, self.h6_b = conv2d_transpose(h5,
-            [self.batch_size, 256, 256, self.c_dim], name='g_h6', with_w=True)
-        
-        print h6._shape
-        return tf.nn.tanh(h6)
-
-    def sampler(self, z, y=None):
-        tf.get_variable_scope().reuse_variables()
-
-        h0 = tf.reshape(linear(z, self.gf_dim*4*4*4*8, 'g_h0_lin'),[self.batch_size, 4, 4, self.gf_dim * 32])
-        h0 = tf.nn.relu(self.g_bn0(h0, train=False))
-
-        h1 = conv2d_transpose(h0, [self.batch_size, 8, 8, self.gf_dim*16], name='g_h1')
-        h1 = tf.nn.relu(self.g_bn1(h1, train=False))
-
-        h2, self.h2_w, self.h2_b = conv2d_transpose(h1,
-            [self.batch_size, 16, 16, self.gf_dim*8], name='g_h2', with_w=True)
-        h2 = tf.nn.relu(self.g_bn2(h2))
-
-        h3, self.h3_w, self.h3_b = conv2d_transpose(h2,
-            [self.batch_size, 32, 32, self.gf_dim*4], name='g_h3', with_w=True)
-        h3 = tf.nn.relu(self.g_bn3(h3))        
-
-        h4, self.h4_w, self.h4_b = conv2d_transpose(h3,
-            [self.batch_size, 64, 64, self.gf_dim*2], name='g_h4', with_w=True)
-        h4 = tf.nn.relu(self.g_bn4(h4))
-
-        h5, self.h5_w, self.h5_b = conv2d_transpose(h4,
-            [self.batch_size, 128, 128, self.gf_dim*1], name='g_h5', with_w=True)
-        h5 = tf.nn.relu(self.g_bn5(h5))
-
-        h6, self.h6_w, self.h6_b = conv2d_transpose(h5,
-            [self.batch_size, 256, 256, self.c_dim], name='g_h6', with_w=True)
- 
-        return tf.nn.tanh(h6)
+            with tf.variable_scope("layer_5"):
+                h5 = conv2d_transpose(h4,
+                    [self.batch_size, 128, 128, self.gf_dim*1], name='g_h5')
+                g_bn5 = batch_norm(name='g_bn5')
+                h5 = tf.nn.relu(g_bn5(h5))
+            
+            with tf.variable_scope("layer_6"):
+                h6 = conv2d_transpose(h5,
+                    [self.batch_size, 256, 256, self.c_dim], name='g_h6')
+                return tf.nn.tanh(h6)
 
     def save(self, checkpoint_dir, step):
         if not os.path.exists(checkpoint_dir):
